@@ -125,6 +125,10 @@
   .frm-col > span { display: block; font-size: 13.5px; color: var(--ink-2); margin-bottom: 8px; }
   .note { font-size: 11.5px; color: var(--ink-3); line-height: 1.5; margin-top: 8px; }
   .note a { color: var(--green); }
+  .seg { display: flex; gap: 6px; }
+  .seg button { flex: 1; padding: 10px 4px; border: 1px solid var(--line); border-radius: 12px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); background: var(--bg); }
+  .seg button.on { background: var(--green); color: #fff; border-color: var(--green); }
+  select.sel { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; font-size: 13.5px; outline: none; background: var(--card); color: var(--ink); }
   .sec-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); margin: 22px 0 6px; }
 
   /* Progress */
@@ -226,6 +230,12 @@
 <!-- ======== SETTINGS TAB ======== -->
 <div id="tab-settings" class="hide">
   <div class="card">
+    <div class="card-title">🧮 Calculate my goals</div>
+    <p style="font-size:13px;color:var(--ink-2);line-height:1.5">Enter your height, weight, and goal — we'll work out your daily calories and macros for you.</p>
+    <button class="btn" id="open-calc" style="margin-top:12px">Open calculator</button>
+  </div>
+
+  <div class="card">
     <div class="card-title">🎯 Daily goals</div>
     <div class="frm"><span>Calorie goal (kcal)</span><input id="s-cal" type="number"></div>
     <div class="frm"><span>Protein goal (g)</span><input id="s-prot" type="number"></div>
@@ -253,7 +263,7 @@
     <button class="btn ghost" id="imp">Import backup</button>
     <input type="file" id="imp-file" accept="application/json" class="hide">
     <div class="note">Everything lives on this phone. Export a backup now and then — clearing browser data would erase your logs.</div>
-    <div class="note" style="text-align:center;margin-top:14px">GainLog v4.0</div>
+    <div class="note" style="text-align:center;margin-top:14px">GainLog v5.0</div>
   </div>
 </div>
 
@@ -608,6 +618,96 @@ $('s-key-save').onclick = () => {
   LS.set('apikey', k);
   toast(k ? 'API key saved' : 'API key removed');
 };
+
+// ---------- goal calculator (Mifflin-St Jeor) ----------
+const ACTIVITY_MULT = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, very: 1.9 };
+const ACTIVITY_LABELS = {
+  sedentary: 'Sedentary (little/no exercise)', light: 'Light (1-3 days/wk)',
+  moderate: 'Moderate (3-5 days/wk)', active: 'Active (6-7 days/wk)',
+  very: 'Very active (2x/day or physical job)',
+};
+const RATE_DELTA = { lose: { mild: -250, moderate: -500, aggressive: -750 }, gain: { mild: 250, moderate: 500, aggressive: 750 } };
+let calcState = LS.get('calc_inputs', { sex: 'male', age: 22, height: 170, weight: 60, activity: 'moderate', goal: 'gain', rate: 'moderate' });
+
+function computeGoals(s) {
+  const bmr = s.sex === 'male'
+    ? 10 * s.weight + 6.25 * s.height - 5 * s.age + 5
+    : 10 * s.weight + 6.25 * s.height - 5 * s.age - 161;
+  const tdee = bmr * ACTIVITY_MULT[s.activity];
+  let target = tdee;
+  if (s.goal === 'lose') target = tdee + RATE_DELTA.lose[s.rate];
+  else if (s.goal === 'gain') target = tdee + RATE_DELTA.gain[s.rate];
+  target = Math.max(1200, Math.round(target));
+  const proteinPerKg = s.goal === 'lose' ? 2.0 : s.goal === 'gain' ? 1.8 : 1.6;
+  const protein = Math.round(s.weight * proteinPerKg);
+  const fat = Math.round((target * 0.27) / 9);
+  const carbs = Math.max(0, Math.round((target - protein * 4 - fat * 9) / 4));
+  return { bmr: Math.round(bmr), tdee: Math.round(tdee), target, protein, carbs, fat };
+}
+
+function calcFormHtml() {
+  return `
+    <div class="frm-col"><span>Sex</span><div class="seg" id="c-sex"><button data-v="male">Male</button><button data-v="female">Female</button></div></div>
+    <div class="frm"><span>Age (years)</span><input id="c-age" type="number" value="${calcState.age}"></div>
+    <div class="frm"><span>Height (cm)</span><input id="c-height" type="number" value="${calcState.height}"></div>
+    <div class="frm"><span>Weight (kg)</span><input id="c-weight" type="number" value="${calcState.weight}"></div>
+    <div class="frm-col"><span>Activity level</span>
+      <select id="c-activity" class="sel">${Object.entries(ACTIVITY_LABELS).map(([k, l]) => `<option value="${k}" ${calcState.activity === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    </div>
+    <div class="frm-col"><span>Goal</span><div class="seg" id="c-goal"><button data-v="lose">Lose</button><button data-v="maintain">Maintain</button><button data-v="gain">Gain</button></div></div>
+    <div class="frm-col${calcState.goal === 'maintain' ? ' hide' : ''}" id="c-rate-wrap"><span>Rate</span><div class="seg" id="c-rate"><button data-v="mild">Mild</button><button data-v="moderate">Moderate</button><button data-v="aggressive">Aggressive</button></div></div>
+    <button class="btn" id="c-calc" style="margin-top:14px">Calculate</button>
+    <div id="c-result"></div>
+  `;
+}
+
+function wireCalcForm() {
+  const setSeg = (id, val) => { $(id).querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === val)); };
+  setSeg('c-sex', calcState.sex); setSeg('c-goal', calcState.goal); setSeg('c-rate', calcState.rate);
+
+  $('c-sex').querySelectorAll('button').forEach((b) => b.onclick = () => { calcState.sex = b.dataset.v; setSeg('c-sex', calcState.sex); });
+  $('c-goal').querySelectorAll('button').forEach((b) => b.onclick = () => {
+    calcState.goal = b.dataset.v; setSeg('c-goal', calcState.goal);
+    $('c-rate-wrap').classList.toggle('hide', calcState.goal === 'maintain');
+  });
+  $('c-rate').querySelectorAll('button').forEach((b) => b.onclick = () => { calcState.rate = b.dataset.v; setSeg('c-rate', calcState.rate); });
+
+  $('c-calc').onclick = () => {
+    calcState.age = parseInt($('c-age').value) || calcState.age;
+    calcState.height = parseFloat($('c-height').value) || calcState.height;
+    calcState.weight = parseFloat($('c-weight').value) || calcState.weight;
+    calcState.activity = $('c-activity').value;
+    LS.set('calc_inputs', calcState);
+    const r = computeGoals(calcState);
+    const goalLabel = calcState.goal === 'maintain' ? 'to maintain weight' : calcState.goal === 'gain' ? 'to gain weight steadily' : 'to lose weight steadily';
+    $('c-result').innerHTML = `
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid #F0EEE8">
+        <div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--ink-2);margin-bottom:4px"><span>BMR</span><b style="color:var(--ink)">${r.bmr} kcal</b></div>
+        <div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--ink-2);margin-bottom:10px"><span>Maintenance (TDEE)</span><b style="color:var(--ink)">${r.tdee} kcal</b></div>
+        <div style="text-align:center;padding:14px;background:var(--green-soft);border-radius:14px;margin-bottom:12px">
+          <div style="font-size:26px;font-weight:700;color:var(--green)">${r.target} kcal/day</div>
+          <div style="font-size:11.5px;color:var(--ink-3);margin-top:2px">${goalLabel}</div>
+        </div>
+        <div style="display:flex;gap:10px;text-align:center;margin-bottom:14px">
+          <div style="flex:1"><b style="display:block;font-size:15px">${r.protein}g</b><span style="font-size:11px;color:var(--ink-3)">Protein</span></div>
+          <div style="flex:1"><b style="display:block;font-size:15px">${r.carbs}g</b><span style="font-size:11px;color:var(--ink-3)">Carbs</span></div>
+          <div style="flex:1"><b style="display:block;font-size:15px">${r.fat}g</b><span style="font-size:11px;color:var(--ink-3)">Fat</span></div>
+        </div>
+        <button class="btn" id="c-apply">✓ Apply to my goals</button>
+        <div class="note">Estimate via the Mifflin-St Jeor formula — adjust over 2-3 weeks based on how your weight actually trends.</div>
+      </div>`;
+    $('c-apply').onclick = () => {
+      settings = Object.assign({}, settings, { cal: r.target, prot: r.protein, carbs: r.carbs, fat: r.fat });
+      LS.set('settings', settings);
+      closeSheet();
+      toast('Goals updated ✓');
+      renderSettings();
+      renderAll();
+    };
+  };
+}
+
+$('open-calc').onclick = () => { sheet('Calculate my goals', calcFormHtml()); wireCalcForm(); };
 
 $('s-key-test').onclick = async () => {
   const out = $('test-result');
