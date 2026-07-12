@@ -149,6 +149,7 @@
   <div class="streak" id="streak">🔥 0 day streak</div>
 </header>
 
+<!-- ======== TODAY TAB ======== -->
 <div id="tab-today">
   <div class="week">
     <button class="nav" id="wk-prev">‹</button>
@@ -188,6 +189,7 @@
   <div id="entries"></div>
 </div>
 
+<!-- ======== PROGRESS TAB ======== -->
 <div id="tab-progress" class="hide">
   <div class="card">
     <div class="card-title">⚖️ Weight</div>
@@ -206,6 +208,7 @@
   </div>
 </div>
 
+<!-- ======== REMINDERS TAB ======== -->
 <div id="tab-remind" class="hide">
   <div class="card">
     <div class="card-title">🔔 Meal reminders</div>
@@ -220,6 +223,7 @@
   </div>
 </div>
 
+<!-- ======== SETTINGS TAB ======== -->
 <div id="tab-settings" class="hide">
   <div class="card">
     <div class="card-title">🎯 Daily goals</div>
@@ -410,4 +414,399 @@ function renderProgress() {
     const py = (kg) => 20 + (1 - (kg - min) / (max - min)) * (c.height - 60);
     ctx.strokeStyle = '#E8E5DE'; ctx.lineWidth = 1; ctx.font = '18px sans-serif'; ctx.fillStyle = '#A5A199';
     for (let g = 0; g <= 3; g++) {
-      const
+      const kg = min + (g / 3) * (max - min), y = py(kg);
+      ctx.beginPath(); ctx.moveTo(40, y); ctx.lineTo(c.width - 20, y); ctx.stroke();
+      ctx.fillText(round1(kg), 2, y + 6);
+    }
+    ctx.strokeStyle = '#3F6B4F'; ctx.lineWidth = 3; ctx.beginPath();
+    data.forEach((w, i) => { i ? ctx.lineTo(px(i), py(w.kg)) : ctx.moveTo(px(i), py(w.kg)); });
+    ctx.stroke();
+    ctx.fillStyle = '#C9973B';
+    data.forEach((w, i) => { ctx.beginPath(); ctx.arc(px(i), py(w.kg), 5, 0, 7); ctx.fill(); });
+    const diff = round1(data[data.length - 1].kg - data[0].kg);
+    $('w-note').textContent = `${data.length} entries · ${diff >= 0 ? '+' : ''}${diff} kg over this period. Target: +0.25–0.5 kg/week.`;
+  } else {
+    ctx.fillStyle = '#A5A199'; ctx.font = '20px sans-serif';
+    ctx.fillText('Log your weight a few times to see the trend.', 40, c.height / 2);
+    $('w-note').textContent = '';
+  }
+
+  // weekly table
+  const tbl = $('wk-table');
+  let rows = '<tr><th>Day</th><th>Food</th><th>Remaining</th><th>Water</th></tr>';
+  let weekTotal = 0, tracked = 0;
+  const ws = startOfWeek(new Date());
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(ws); d.setDate(d.getDate() + i);
+    const di = iso(d);
+    const t = dayTotals(di); const has = entriesFor(di).length > 0;
+    if (has) { tracked++; weekTotal += settings.cal - t.cal; }
+    const remv = settings.cal - t.cal;
+    rows += `<tr><td>${DAY_LBL[d.getDay()]} ${d.getDate()}</td><td>${has ? Math.round(t.cal) : '–'}</td><td>${has ? `<span class="${remv <= 0 ? 'pos' : 'neg'}">${remv <= 0 ? '+' + Math.round(-remv) + ' over' : Math.round(remv) + ' short'}</span>` : '–'}</td><td>${waterFor(di) || '–'}</td></tr>`;
+  }
+  tbl.innerHTML = rows;
+  $('wk-note').textContent = tracked
+    ? `${tracked}/7 days tracked. For gaining, "over" goal is good — that's your surplus.`
+    : 'No days tracked this week yet.';
+}
+
+$('w-save').onclick = () => {
+  const v = parseFloat($('w-input').value);
+  if (!v || v < 20 || v > 300) return toast('Enter a valid weight in kg');
+  const weights = LS.get('weights', []).filter((w) => w.date !== iso(new Date()));
+  weights.push({ date: iso(new Date()), kg: v });
+  weights.sort((a, b) => a.date < b.date ? -1 : 1);
+  LS.set('weights', weights);
+  $('w-input').value = '';
+  toast('Weight saved');
+  renderProgress();
+};
+
+// ---------- reminders tab ----------
+function renderRemind() {
+  const wrap = $('consistency'); wrap.innerHTML = '';
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    const has = entriesFor(iso(d)).length > 0;
+    wrap.innerHTML += `<div><div style="font-size:10px;color:var(--ink-3)">${DAY_LBL[d.getDay()]}</div><div style="font-size:18px;margin-top:3px">${has ? '✅' : '·'}</div></div>`;
+  }
+  updateNotifBtn();
+}
+function updateNotifBtn() {
+  const b = $('notif-btn');
+  if (!('Notification' in window)) { b.textContent = 'Notifications not supported here'; b.disabled = true; return; }
+  if (Notification.permission === 'granted') { b.textContent = '✓ Notifications enabled'; b.classList.add('ghost'); }
+  else if (Notification.permission === 'denied') { b.textContent = 'Blocked — allow in browser settings'; b.disabled = true; }
+  else { b.textContent = 'Enable notifications'; }
+}
+$('notif-btn').onclick = async () => {
+  const perm = await Notification.requestPermission();
+  updateNotifBtn();
+  if (perm === 'granted') {
+    toast('Reminders on: 8:00, 13:00, 20:00');
+    setupBackgroundReminders();
+    scheduleInPageReminders();
+  }
+};
+
+const REMIND_HOURS = [
+  { h: 8,  title: 'Breakfast time 🌅', body: "Big breakfast, big gains. Log it when you're done!" },
+  { h: 13, title: 'Lunch check-in 🍛', body: "Don't skip lunch — log your meal to stay on track." },
+  { h: 20, title: 'Dinner reminder 🌙', body: 'Last big meal of the day. Log it and check your surplus!' },
+];
+async function setupBackgroundReminders() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if ('periodicSync' in reg) {
+      const status = await navigator.permissions.query({ name: 'periodic-background-sync' });
+      if (status.state === 'granted') {
+        await reg.periodicSync.register('gainlog-reminders', { minInterval: 60 * 60 * 1000 });
+      }
+    }
+    reg.active && reg.active.postMessage('check-reminders');
+  } catch (e) {}
+}
+let pageTimers = [];
+function scheduleInPageReminders() {
+  pageTimers.forEach(clearTimeout); pageTimers = [];
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const now = new Date();
+  REMIND_HOURS.forEach((r) => {
+    const t = new Date(); t.setHours(r.h, 0, 0, 0);
+    if (t > now) {
+      pageTimers.push(setTimeout(async () => {
+        try {
+          const reg = await navigator.serviceWorker.ready;
+          reg.showNotification(r.title, { body: r.body, icon: './icons/icon-192.png', tag: 'gainlog-' + r.h + '-' + now.toDateString() });
+        } catch (e) {}
+      }, t - now));
+    }
+  });
+}
+
+// ---------- settings tab ----------
+function renderSettings() {
+  $('s-cal').value = settings.cal; $('s-prot').value = settings.prot;
+  $('s-carbs').value = settings.carbs; $('s-fat').value = settings.fat; $('s-water').value = settings.water;
+  $('s-key').value = LS.get('apikey', '');
+}
+$('s-save').onclick = () => {
+  settings = {
+    cal: parseInt($('s-cal').value) || 2800, prot: parseInt($('s-prot').value) || 140,
+    carbs: parseInt($('s-carbs').value) || 350, fat: parseInt($('s-fat').value) || 90,
+    water: parseInt($('s-water').value) || 8,
+  };
+  LS.set('settings', settings);
+  toast('Goals saved');
+  renderAll();
+};
+$('s-key-save').onclick = () => {
+  const k = $('s-key').value.trim();
+  LS.set('apikey', k);
+  toast(k ? 'API key saved' : 'API key removed');
+};
+
+$('s-key-test').onclick = async () => {
+  const out = $('test-result');
+  const k = $('s-key').value.trim() || LS.get('apikey', '');
+  if (!k) { out.textContent = '✗ No key entered. Paste your key above first.'; return; }
+  LS.set('apikey', k);
+  out.textContent = 'Testing…';
+  try {
+    const res = await fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + encodeURIComponent(k),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: 'Reply with the single word: ok' }] }] }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      const t = data?.candidates?.[0]?.content?.parts?.[0]?.text || '(no text)';
+      out.textContent = '✓ SUCCESS! Gemini replied: "' + t.trim().slice(0, 40) + '" — photo & text analysis will work.';
+    } else {
+      const msg = data?.error?.message || 'unknown error';
+      out.textContent = '✗ FAILED (HTTP ' + res.status + '): ' + msg;
+    }
+  } catch (e) {
+    out.textContent = '✗ NETWORK ERROR: ' + (e && e.message ? e.message : 'fetch failed') + ' — check internet or try mobile data instead of WiFi.';
+  }
+};
+
+// export / import
+$('exp').onclick = () => {
+  const dump = {};
+  for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); dump[k] = localStorage.getItem(k); }
+  delete dump.apikey; // don't export secrets
+  const blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'gainlog-backup-' + iso(new Date()) + '.json';
+  a.click();
+};
+$('imp').onclick = () => $('imp-file').click();
+$('imp-file').onchange = (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const dump = JSON.parse(r.result);
+      Object.entries(dump).forEach(([k, v]) => { if (k !== 'apikey') localStorage.setItem(k, v); });
+      settings = LS.get('settings', settings);
+      toast('Backup imported');
+      renderAll();
+    } catch (err) { toast('Invalid backup file'); }
+  };
+  r.readAsText(f);
+  e.target.value = '';
+};
+
+// ---------- tabs ----------
+document.querySelectorAll('nav.tabs button').forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll('nav.tabs button').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    ['today','progress','remind','settings'].forEach((t) => $('tab-' + t).classList.toggle('hide', t !== b.dataset.tab));
+    $('fab').classList.toggle('hide', b.dataset.tab !== 'today');
+    if (b.dataset.tab === 'progress') renderProgress();
+    if (b.dataset.tab === 'remind') renderRemind();
+    if (b.dataset.tab === 'settings') renderSettings();
+  };
+});
+
+// ---------- add food flow ----------
+const sheetRoot = $('sheet-root');
+function closeSheet() { sheetRoot.innerHTML = ''; }
+function sheet(title, bodyHTML) {
+  sheetRoot.innerHTML = `<div class="overlay"><div class="sheet"><div class="sheet-head"><b>${title}</b><button class="x">✕</button></div><div id="sheet-body">${bodyHTML}</div></div></div>`;
+  sheetRoot.querySelector('.x').onclick = closeSheet;
+  sheetRoot.querySelector('.overlay').onclick = (e) => { if (e.target.classList.contains('overlay')) closeSheet(); };
+  return $('sheet-body');
+}
+
+$('fab').onclick = () => {
+  const body = sheet('Log food', `
+    <button class="opt" id="o-cam"><span class="ic">📷</span>Take a photo</button>
+    <button class="opt" id="o-gal"><span class="ic">🖼️</span>Choose from gallery</button>
+    <button class="opt" id="o-txt"><span class="ic">✍️</span>Describe in words</button>
+    <button class="opt" id="o-man"><span class="ic">➕</span>Enter manually (no AI)</button>
+  `);
+  $('o-cam').onclick = () => $('file-cam').click();
+  $('o-gal').onclick = () => $('file-gal').click();
+  $('o-txt').onclick = showTextSheet;
+  $('o-man').onclick = () => showReview([{ name: '', quantity: '', calories: 0, carbs: 0, protein: 0, fat: 0 }]);
+};
+$('file-cam').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) analyzePhoto(f); };
+$('file-gal').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) analyzePhoto(f); };
+
+function showTextSheet() {
+  const body = sheet('Describe your food', `
+    <textarea class="desc" id="desc" placeholder="e.g. 2 parathas with egg omelette and a cup of milk tea"></textarea>
+    <button class="btn" id="go">Analyze with AI</button>
+  `);
+  $('desc').focus();
+  $('go').onclick = async () => {
+    const v = $('desc').value.trim(); if (!v) return;
+    showAnalyzing();
+    try { showReview(await aiAnalyze({ description: v })); }
+    catch (err) { showError(err); }
+  };
+}
+function showAnalyzing() { sheet('Analyzing…', `<div class="spin"><div class="spinner"></div>Reading your food and estimating nutrition…</div>`); }
+function showError(err) {
+  const noKey = err && err.message === 'nokey';
+  const isQuota = err && err.message === 'quota';
+  const detail = err && err.message ? err.message : '';
+  sheet('Hmm', `
+    <p style="font-size:13.5px;color:var(--ink-2);line-height:1.55">${noKey
+      ? 'No API key set yet. Add your free Google AI key in Settings → AI setup (2 minutes, no card needed), or log manually.'
+      : isQuota
+      ? "Today's free AI quota is used up (resets at midnight PT). Log manually for now — everything else works normally."
+      : "Couldn't analyze that. Details below — if this keeps happening, screenshot this box."}</p>
+    ${(!noKey && !isQuota && detail) ? `<p style="font-size:11px;color:var(--ink-3);background:#F5F3EE;padding:8px 10px;border-radius:10px;margin-top:8px;word-break:break-all">${esc(detail)}</p>` : ''}
+    <button class="btn ghost" id="back" style="margin-top:14px">Back</button>
+    <button class="btn ghost" id="man">Enter manually instead</button>
+  `);
+  $('back').onclick = () => $('fab').onclick();
+  $('man').onclick = () => showReview([{ name: '', quantity: '', calories: 0, carbs: 0, protein: 0, fat: 0 }]);
+}
+
+function resizeImage(file, maxDim = 900, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(); const r = new FileReader();
+    r.onload = (e) => { img.src = e.target.result; };
+    r.onerror = reject;
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > height && width > maxDim) { height = height * maxDim / width; width = maxDim; }
+      else if (height > maxDim) { width = width * maxDim / height; height = maxDim; }
+      const cv = document.createElement('canvas'); cv.width = width; cv.height = height;
+      cv.getContext('2d').drawImage(img, 0, 0, width, height);
+      resolve(cv.toDataURL('image/jpeg', quality).split(',')[1]);
+    };
+    img.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+async function analyzePhoto(file) {
+  showAnalyzing();
+  try {
+    const b64 = await resizeImage(file);
+    showReview(await aiAnalyze({ imageBase64: b64 }));
+  } catch (err) { showError(err); }
+}
+
+// Free-tier Gemini models, tried in order (Flash has huge daily quota)
+const GEMINI_MODELS = ['gemini-1.5-flash'];
+
+async function aiAnalyze({ imageBase64, description }) {
+  const key = LS.get('apikey', '');
+  if (!key) throw new Error('nokey');
+
+  const parts = [];
+  if (imageBase64) parts.push({ inlineData: { mimeType: 'image/jpeg', data: imageBase64 } });
+  const instruction = description
+    ? `The user ate: "${description}". Estimate nutrition for this. Common South Asian / Bangladeshi foods are likely.`
+    : 'Identify the food(s) in this photo and estimate nutrition for the visible portion size. Common South Asian / Bangladeshi foods are likely.';
+  parts.push({ text: instruction + `\nRespond with ONLY valid JSON, exactly this shape:
+{"items":[{"name":"short food name","quantity":"e.g. '1 bowl' or '2 pieces'","calories":number,"carbs":number,"protein":number,"fat":number}]}
+Realistic estimates. Calories in kcal, macros in grams. Multiple foods = multiple items.` });
+
+  const body = JSON.stringify({
+    contents: [{ parts }],
+    generationConfig: { responseMimeType: 'application/json', temperature: 0.2 },
+  });
+
+  let lastErr = null;
+  for (const model of GEMINI_MODELS) {
+    try {
+      const res = await fetch(
+        'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + encodeURIComponent(key),
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }
+      );
+      if (res.status === 429) { lastErr = new Error('quota'); continue; } // daily quota hit → try next model
+      if (!res.ok) {
+        let detail = '';
+        try { const errJson = await res.json(); detail = errJson?.error?.message || ''; } catch (e2) {}
+        const e = new Error('http:' + res.status + (detail ? ':' + detail : ''));
+        lastErr = e; continue;
+      }
+      const data = await res.json();
+      const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+      if (!text) { lastErr = new Error('empty'); continue; }
+      const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+      if (!parsed.items || !Array.isArray(parsed.items) || !parsed.items.length) { lastErr = new Error('shape'); continue; }
+      return parsed.items.map((it) => ({
+        name: String(it.name || 'Food item'), quantity: String(it.quantity || ''),
+        calories: Number(it.calories) || 0, carbs: Number(it.carbs) || 0,
+        protein: Number(it.protein) || 0, fat: Number(it.fat) || 0,
+      }));
+    } catch (e) { lastErr = new Error('network:' + (e && e.message ? e.message : 'failed')); }
+  }
+  throw lastErr || new Error('http');
+}
+
+let reviewItems = [];
+function showReview(items) {
+  reviewItems = items;
+  const body = sheet('Review & save', `<div id="rv-list"></div><button class="btn" id="rv-save">✓ Save to log</button>`);
+  drawReview();
+  $('rv-save').onclick = () => {
+    reviewItems = reviewItems.filter((it) => it.name.trim());
+    if (!reviewItems.length) return toast('Add a food name first');
+    const now = new Date();
+    const di = iso(selected);
+    const arr = entriesFor(di);
+    arr.push({ id: String(Date.now()), time: pad(now.getHours()) + ':' + pad(now.getMinutes()), items: reviewItems });
+    saveEntries(di, arr);
+    closeSheet();
+    toast('Logged! 💪');
+    renderAll();
+  };
+}
+function drawReview() {
+  const list = $('rv-list'); list.innerHTML = '';
+  reviewItems.forEach((it, idx) => {
+    const d = document.createElement('div');
+    d.className = 'rv';
+    d.innerHTML = `
+      <div class="row1"><input class="nm" placeholder="Food name" value="${esc(it.name)}"><button class="x rm">✕</button></div>
+      <input class="qty" placeholder="quantity (e.g. 1 bowl)" value="${esc(it.quantity)}">
+      <div class="grid">
+        <div><label>kcal</label><input type="number" data-f="calories" value="${it.calories}"></div>
+        <div><label>carbs g</label><input type="number" data-f="carbs" value="${it.carbs}"></div>
+        <div><label>protein g</label><input type="number" data-f="protein" value="${it.protein}"></div>
+        <div><label>fat g</label><input type="number" data-f="fat" value="${it.fat}"></div>
+      </div>`;
+    d.querySelector('.nm').oninput = (e) => { reviewItems[idx].name = e.target.value; };
+    d.querySelector('.qty').oninput = (e) => { reviewItems[idx].quantity = e.target.value; };
+    d.querySelectorAll('[data-f]').forEach((inp) => { inp.oninput = (e) => { reviewItems[idx][inp.dataset.f] = Number(e.target.value) || 0; }; });
+    d.querySelector('.rm').onclick = () => { reviewItems.splice(idx, 1); drawReview(); };
+    list.appendChild(d);
+  });
+  const add = document.createElement('button');
+  add.className = 'btn ghost'; add.style.marginBottom = '12px'; add.textContent = '＋ Add another item';
+  add.onclick = () => { reviewItems.push({ name: '', quantity: '', calories: 0, carbs: 0, protein: 0, fat: 0 }); drawReview(); };
+  list.appendChild(add);
+}
+
+// ---------- boot ----------
+function renderAll() { renderWeek(); renderToday(); }
+renderAll();
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').then(() => {
+    if (Notification.permission === 'granted') { setupBackgroundReminders(); scheduleInPageReminders(); }
+  }).catch(() => {});
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && 'serviceWorker' in navigator && Notification.permission === 'granted') {
+    navigator.serviceWorker.ready.then((reg) => reg.active && reg.active.postMessage('check-reminders'));
+    scheduleInPageReminders();
+  }
+});
+</script>
+</body>
+</html>
