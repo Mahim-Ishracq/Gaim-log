@@ -1,30 +1,38 @@
-const CACHE = 'gainlog-v1';
+const CACHE = 'gainlog-v2';
 const ASSETS = ['./', './index.html', './manifest.json', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)));
+  e.waitUntil(
+    caches.open(CACHE).then((c) =>
+      Promise.all(ASSETS.map((a) => fetch(a, { cache: 'no-cache' }).then((r) => c.put(a, r)).catch(() => {})))
+    )
+  );
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE && k !== 'gainlog-notif-markers').map((k) => caches.delete(k)))).then(() => self.clients.claim())
   );
 });
 
-// Cache-first for app shell; network-only for API calls
+// NETWORK-FIRST for the app itself (so updates always arrive), cache fallback for offline.
+// API calls are never touched.
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  if (url.hostname === 'api.anthropic.com') return; // never cache API calls
+  if (url.hostname.endsWith('googleapis.com')) return; // never intercept AI calls
   if (e.request.method !== 'GET') return;
+  if (url.origin !== self.location.origin) return;
   e.respondWith(
-    caches.match(e.request).then((cached) => cached || fetch(e.request).then((res) => {
-      if (res.ok && url.origin === self.location.origin) {
-        const clone = res.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, clone));
-      }
-      return res;
-    }).catch(() => cached))
+    fetch(e.request, { cache: 'no-cache' })
+      .then((res) => {
+        if (res.ok) {
+          const clone = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, clone));
+        }
+        return res;
+      })
+      .catch(() => caches.match(e.request))
   );
 });
 
@@ -40,20 +48,15 @@ async function maybeNotify() {
   const hour = now.getHours();
   const todayKey = now.toDateString();
   for (const r of REMINDERS) {
-    // fire if we're within 2 hours after the slot
     if (hour >= r.hour && hour < r.hour + 2) {
       const tag = `gainlog-${r.hour}-${todayKey}`;
       const existing = await self.registration.getNotifications({ tag });
       if (existing.length === 0) {
-        // check a marker in cache to avoid re-firing after dismissal
         const cache = await caches.open('gainlog-notif-markers');
         const marker = await cache.match(`https://local/marker/${tag}`);
         if (!marker) {
           await self.registration.showNotification(r.title, {
-            body: r.body,
-            tag,
-            icon: './icons/icon-192.png',
-            badge: './icons/icon-192.png',
+            body: r.body, tag, icon: './icons/icon-192.png', badge: './icons/icon-192.png',
           });
           await cache.put(`https://local/marker/${tag}`, new Response('1'));
         }
@@ -65,11 +68,9 @@ async function maybeNotify() {
 self.addEventListener('periodicsync', (e) => {
   if (e.tag === 'gainlog-reminders') e.waitUntil(maybeNotify());
 });
-
 self.addEventListener('message', (e) => {
-  if (e.data === 'check-reminders') e.waitUntil ? e.waitUntil(maybeNotify()) : maybeNotify();
+  if (e.data === 'check-reminders') maybeNotify();
 });
-
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
   e.waitUntil(
