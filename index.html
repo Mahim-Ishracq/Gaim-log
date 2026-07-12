@@ -253,7 +253,7 @@
     <button class="btn ghost" id="imp">Import backup</button>
     <input type="file" id="imp-file" accept="application/json" class="hide">
     <div class="note">Everything lives on this phone. Export a backup now and then — clearing browser data would erase your logs.</div>
-    <div class="note" style="text-align:center;margin-top:14px">GainLog v3.0</div>
+    <div class="note" style="text-align:center;margin-top:14px">GainLog v4.0</div>
   </div>
 </div>
 
@@ -369,25 +369,88 @@ function renderToday() {
     list.innerHTML = '<div class="empty"><div class="big">🌱</div>Nothing logged yet.<br>Tap ＋ to add your first meal.</div>';
   } else {
     es.slice().reverse().forEach((e) => {
-      const tot = e.items.reduce((s, it) => s + it.calories, 0);
       const div = document.createElement('div');
       div.className = 'entry';
-      div.innerHTML = e.items.map((it) =>
-        `<div class="item"><div class="nm">${esc(it.name)}${it.quantity ? ' (' + esc(it.quantity) + ')' : ''}</div>
-         <div class="nu">${Math.round(it.calories)} kcal · C ${round1(it.carbs)}g · P ${round1(it.protein)}g · F ${round1(it.fat)}g</div></div>`
-      ).join('') +
-      `<div class="foot"><span class="t">${e.time}</span><span><button class="del" data-id="${e.id}">Delete</button><span class="c">${Math.round(tot)} kcal</span></span></div>`;
-      div.querySelector('.del').onclick = () => {
+      const thumbHtml = e.thumb ? `<img src="${e.thumb}" style="width:48px;height:48px;border-radius:10px;object-fit:cover;flex-shrink:0">` : '';
+      const hasSource = !!analysisSource[e.id] || !!e.desc;
+
+      if (e.status === 'analyzing' && (analysisSource[e.id])) {
+        div.innerHTML = `
+          <div style="display:flex;gap:10px;align-items:center">${thumbHtml}
+            <div style="flex:1;min-width:0;display:flex;align-items:center;gap:8px">
+              <div class="spinner" style="width:16px;height:16px;border-width:2px;margin:0"></div>
+              <span style="font-size:13px;color:var(--ink-2)">Analyzing…</span>
+            </div>
+          </div>
+          <div class="foot"><span class="t">${e.time}</span></div>`;
+      } else if (e.status === 'error' || e.status === 'analyzing') {
+        const isNoKey = e.errorMsg === 'nokey';
+        const label = isNoKey ? 'No API key set' : (e.status === 'analyzing' ? 'Analysis was interrupted' : "Couldn't analyze this");
+        div.innerHTML = `
+          <div style="display:flex;gap:10px;align-items:center">${thumbHtml}
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;color:var(--danger)">${label}${e.desc ? ': "' + esc(e.desc) + '"' : ''}</div>
+            </div>
+          </div>
+          <div class="foot"><span class="t">${e.time}</span><span>
+            ${(hasSource && !isNoKey) ? '<button class="del retry" style="color:var(--green);font-weight:600">Retry</button>' : ''}
+            <button class="del edit">Edit</button><button class="del del-btn">Delete</button></span></div>`;
+      } else {
+        const tot = e.items.reduce((s, it) => s + it.calories, 0);
+        const itemsHtml = e.items.map(itemHtml).join('');
+        div.innerHTML = e.thumb
+          ? `<div style="display:flex;gap:10px"><img src="${e.thumb}" style="width:48px;height:48px;border-radius:10px;object-fit:cover;flex-shrink:0"><div style="flex:1;min-width:0">${itemsHtml}</div></div>
+             <div class="foot"><span class="t">${e.time}</span><span><button class="del edit">Edit</button><button class="del del-btn">Delete</button><span class="c">${Math.round(tot)} kcal</span></span></div>`
+          : `${itemsHtml}<div class="foot"><span class="t">${e.time}</span><span><button class="del edit">Edit</button><button class="del del-btn">Delete</button><span class="c">${Math.round(tot)} kcal</span></span></div>`;
+      }
+
+      const editBtn = div.querySelector('.edit');
+      if (editBtn) editBtn.onclick = () => openEditEntry(di, e);
+      const delBtn = div.querySelector('.del-btn');
+      if (delBtn) delBtn.onclick = () => {
         if (!confirm('Delete this entry?')) return;
         saveEntries(di, entriesFor(di).filter((x) => x.id !== e.id));
+        delete analysisSource[e.id];
         renderAll();
+      };
+      const retryBtn = div.querySelector('.retry');
+      if (retryBtn) retryBtn.onclick = () => {
+        const src = analysisSource[e.id] || (e.desc ? { description: e.desc } : null);
+        if (!src) { toast('No data to retry — please re-add'); return; }
+        patchEntry(di, e.id, { status: 'analyzing', errorMsg: null });
+        runAnalysis(di, e.id, src);
       };
       list.appendChild(div);
     });
   }
   renderStreak();
 }
+function itemHtml(it) {
+  return `<div class="item"><div class="nm">${esc(it.name)}${it.quantity ? ' (' + esc(it.quantity) + ')' : ''}</div>
+       <div class="nu">${Math.round(it.calories)} kcal · C ${round1(it.carbs)}g · P ${round1(it.protein)}g · F ${round1(it.fat)}g</div></div>`;
+}
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function newId() { return Date.now() + '-' + Math.random().toString(36).slice(2, 8); }
+const analysisSource = {}; // id -> {imageBase64} or {description}, session-only (used for Retry)
+
+function patchEntry(di, id, patch) {
+  const arr = entriesFor(di);
+  const idx = arr.findIndex((x) => x.id === id);
+  if (idx === -1) return;
+  arr[idx] = Object.assign({}, arr[idx], patch);
+  saveEntries(di, arr);
+  renderWeek();
+  if (iso(selected) === di) renderToday(); else renderStreak();
+}
+
+async function runAnalysis(di, id, source) {
+  try {
+    const items = await aiAnalyze(source);
+    patchEntry(di, id, { items, status: 'done' });
+  } catch (err) {
+    patchEntry(di, id, { status: 'error', errorMsg: err && err.message ? err.message : 'failed' });
+  }
+}
 
 $('w-plus').onclick = () => { const di = iso(selected); LS.set('water:' + di, waterFor(di) + 1); renderToday(); };
 $('w-minus').onclick = () => { const di = iso(selected); LS.set('water:' + di, Math.max(0, waterFor(di) - 1)); renderToday(); };
@@ -648,33 +711,23 @@ $('file-gal').onchange = (e) => { const f = e.target.files[0]; e.target.value = 
 function showTextSheet() {
   const body = sheet('Describe your food', `
     <textarea class="desc" id="desc" placeholder="e.g. 2 parathas with egg omelette and a cup of milk tea"></textarea>
-    <button class="btn" id="go">Analyze with AI</button>
+    <button class="btn" id="go">Log it</button>
   `);
   $('desc').focus();
-  $('go').onclick = async () => {
+  $('go').onclick = () => {
     const v = $('desc').value.trim(); if (!v) return;
-    showAnalyzing();
-    try { showReview(await aiAnalyze({ description: v })); }
-    catch (err) { showError(err); }
+    const di = iso(selected);
+    const now = new Date();
+    const id = newId();
+    const arr = entriesFor(di);
+    arr.push({ id, time: pad(now.getHours()) + ':' + pad(now.getMinutes()), items: [], status: 'analyzing', desc: v });
+    saveEntries(di, arr);
+    analysisSource[id] = { description: v };
+    closeSheet();
+    toast('Added — analyzing in background…');
+    renderAll();
+    runAnalysis(di, id, { description: v });
   };
-}
-function showAnalyzing() { sheet('Analyzing…', `<div class="spin"><div class="spinner"></div>Reading your food and estimating nutrition…</div>`); }
-function showError(err) {
-  const noKey = err && err.message === 'nokey';
-  const isQuota = err && err.message === 'quota';
-  const detail = err && err.message ? err.message : '';
-  sheet('Hmm', `
-    <p style="font-size:13.5px;color:var(--ink-2);line-height:1.55">${noKey
-      ? 'No API key set yet. Add your free Google AI key in Settings → AI setup (2 minutes, no card needed), or log manually.'
-      : isQuota
-      ? "Today's free AI quota is used up (resets at midnight PT). Log manually for now — everything else works normally."
-      : "Couldn't analyze that. Details below — if this keeps happening, screenshot this box."}</p>
-    ${(!noKey && !isQuota && detail) ? `<p style="font-size:11px;color:var(--ink-3);background:#F5F3EE;padding:8px 10px;border-radius:10px;margin-top:8px;word-break:break-all">${esc(detail)}</p>` : ''}
-    <button class="btn ghost" id="back" style="margin-top:14px">Back</button>
-    <button class="btn ghost" id="man">Enter manually instead</button>
-  `);
-  $('back').onclick = () => $('fab').onclick();
-  $('man').onclick = () => showReview([{ name: '', quantity: '', calories: 0, carbs: 0, protein: 0, fat: 0 }]);
 }
 
 function resizeImage(file, maxDim = 900, quality = 0.72) {
@@ -696,11 +749,23 @@ function resizeImage(file, maxDim = 900, quality = 0.72) {
 }
 
 async function analyzePhoto(file) {
-  showAnalyzing();
+  let thumbB64, fullB64;
   try {
-    const b64 = await resizeImage(file);
-    showReview(await aiAnalyze({ imageBase64: b64 }));
-  } catch (err) { showError(err); }
+    thumbB64 = await resizeImage(file, 160, 0.5);
+    fullB64 = await resizeImage(file, 900, 0.72);
+  } catch (e) { toast("Couldn't read that photo"); return; }
+
+  const di = iso(selected);
+  const now = new Date();
+  const id = newId();
+  const arr = entriesFor(di);
+  arr.push({ id, time: pad(now.getHours()) + ':' + pad(now.getMinutes()), items: [], status: 'analyzing', thumb: 'data:image/jpeg;base64,' + thumbB64 });
+  saveEntries(di, arr);
+  analysisSource[id] = { imageBase64: fullB64 };
+  closeSheet();
+  toast('Photo added — analyzing in background…');
+  renderAll();
+  runAnalysis(di, id, { imageBase64: fullB64 });
 }
 
 // Google deprecates Gemini model names every few months (2.0-flash retired June 2026,
@@ -791,22 +856,34 @@ Realistic estimates. Calories in kcal, macros in grams. Multiple foods = multipl
 }
 
 let reviewItems = [];
-function showReview(items) {
-  reviewItems = items;
-  const body = sheet('Review & save', `<div id="rv-list"></div><button class="btn" id="rv-save">✓ Save to log</button>`);
+let editingContext = null; // { di, id } when editing an existing entry, else null
+function showReview(items, editCtx) {
+  reviewItems = items.map((it) => ({ ...it }));
+  editingContext = editCtx || null;
+  const body = sheet(editingContext ? 'Edit entry' : 'Review & save', `<div id="rv-list"></div><button class="btn" id="rv-save">${editingContext ? '✓ Save changes' : '✓ Save to log'}</button>`);
   drawReview();
   $('rv-save').onclick = () => {
     reviewItems = reviewItems.filter((it) => it.name.trim());
     if (!reviewItems.length) return toast('Add a food name first');
-    const now = new Date();
-    const di = iso(selected);
-    const arr = entriesFor(di);
-    arr.push({ id: String(Date.now()), time: pad(now.getHours()) + ':' + pad(now.getMinutes()), items: reviewItems });
-    saveEntries(di, arr);
-    closeSheet();
-    toast('Logged! 💪');
-    renderAll();
+    if (editingContext) {
+      patchEntry(editingContext.di, editingContext.id, { items: reviewItems, status: 'done', errorMsg: null });
+      closeSheet();
+      toast('Updated ✓');
+    } else {
+      const now = new Date();
+      const di = iso(selected);
+      const arr = entriesFor(di);
+      arr.push({ id: newId(), time: pad(now.getHours()) + ':' + pad(now.getMinutes()), items: reviewItems, status: 'done' });
+      saveEntries(di, arr);
+      closeSheet();
+      toast('Logged! 💪');
+      renderAll();
+    }
   };
+}
+function openEditEntry(di, entry) {
+  const items = entry.items && entry.items.length ? entry.items : [{ name: '', quantity: '', calories: 0, carbs: 0, protein: 0, fat: 0 }];
+  showReview(items, { di, id: entry.id });
 }
 function drawReview() {
   const list = $('rv-list'); list.innerHTML = '';
