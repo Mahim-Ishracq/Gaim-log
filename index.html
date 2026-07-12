@@ -554,7 +554,7 @@ $('s-key-test').onclick = async () => {
   out.textContent = 'Testing…';
   try {
     const res = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + encodeURIComponent(k),
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + encodeURIComponent(k),
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -698,8 +698,8 @@ async function analyzePhoto(file) {
   } catch (err) { showError(err); }
 }
 
-// Free-tier Gemini models, tried in order (Flash-Lite has the biggest free daily quota)
-const GEMINI_MODELS = ['gemini-2.5-flash-lite', 'gemini-2.5-flash'];
+// Free-tier Gemini models, tried in order (Flash has huge daily quota)
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash'];
 
 async function aiAnalyze({ imageBase64, description }) {
   const key = LS.get('apikey', '');
