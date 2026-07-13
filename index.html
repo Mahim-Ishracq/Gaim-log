@@ -263,7 +263,7 @@
     <button class="btn ghost" id="imp">Import backup</button>
     <input type="file" id="imp-file" accept="application/json" class="hide">
     <div class="note">Everything lives on this phone. Export a backup now and then — clearing browser data would erase your logs.</div>
-    <div class="note" style="text-align:center;margin-top:14px">GainLog v5.1</div>
+    <div class="note" style="text-align:center;margin-top:14px">GainLog v5.2</div>
   </div>
 </div>
 
@@ -430,6 +430,7 @@ function renderToday() {
       if (retryBtn) retryBtn.onclick = () => {
         const src = analysisSource[e.id] || (e.desc ? { description: e.desc } : null);
         if (!src) { toast('No data to retry — please re-add'); return; }
+        invalidateModelCache();
         patchEntry(di, e.id, { status: 'analyzing', errorMsg: null });
         runAnalysis(di, e.id, src);
       };
@@ -928,34 +929,43 @@ Realistic estimates. Calories in kcal, macros in grams. Multiple foods = multipl
   const discovered = await resolveModel(key);
   const candidates = discovered ? [discovered, ...FALLBACK_MODELS.filter((m) => m !== discovered)] : FALLBACK_MODELS;
 
-  let lastErr = null;
+  const attempts = []; // { model, note } — used to build a full diagnostic if every candidate fails
+  let sawQuota = false, sawNoOtherError = true;
   for (const model of candidates) {
     try {
       const res = await fetch(
         'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + encodeURIComponent(key),
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }
       );
-      if (res.status === 404) { invalidateModelCache(); lastErr = new Error('http:404:model retired'); continue; }
-      if (res.status === 429) { lastErr = new Error('quota'); continue; } // daily quota hit → try next model
+      if (res.status === 429) { sawQuota = true; attempts.push({ model, note: '429 quota' }); continue; }
       if (!res.ok) {
         let detail = '';
         try { const errJson = await res.json(); detail = errJson?.error?.message || ''; } catch (e2) {}
-        lastErr = new Error('http:' + res.status + (detail ? ':' + detail : '')); continue;
+        if (res.status === 404) invalidateModelCache();
+        attempts.push({ model, note: res.status + (detail ? ': ' + detail : '') });
+        continue;
       }
       const data = await res.json();
       const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-      if (!text) { lastErr = new Error('empty'); continue; }
-      const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-      if (!parsed.items || !Array.isArray(parsed.items) || !parsed.items.length) { lastErr = new Error('shape'); continue; }
+      if (!text) {
+        const finish = data?.candidates?.[0]?.finishReason || 'no text';
+        attempts.push({ model, note: 'empty response (' + finish + ')' });
+        continue;
+      }
+      let parsed;
+      try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
+      catch (e3) { attempts.push({ model, note: 'non-JSON reply: ' + text.slice(0, 60) }); continue; }
+      if (!parsed.items || !Array.isArray(parsed.items) || !parsed.items.length) { attempts.push({ model, note: 'unexpected shape' }); continue; }
       LS.set('gemini_model', { model, at: Date.now() }); // remember what actually worked
       return parsed.items.map((it) => ({
         name: String(it.name || 'Food item'), quantity: String(it.quantity || ''),
         calories: Number(it.calories) || 0, carbs: Number(it.carbs) || 0,
         protein: Number(it.protein) || 0, fat: Number(it.fat) || 0,
       }));
-    } catch (e) { lastErr = new Error('network:' + (e && e.message ? e.message : 'failed')); }
+    } catch (e) { attempts.push({ model, note: 'network: ' + (e && e.message ? e.message : 'failed') }); }
   }
-  throw lastErr || new Error('http');
+  if (sawQuota && attempts.every((a) => a.note.includes('429'))) throw new Error('quota');
+  throw new Error(attempts.map((a) => a.model + '→' + a.note).join(' | '));
 }
 
 let reviewItems = [];
