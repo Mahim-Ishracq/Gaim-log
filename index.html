@@ -263,7 +263,7 @@
     <button class="btn ghost" id="imp">Import backup</button>
     <input type="file" id="imp-file" accept="application/json" class="hide">
     <div class="note">Everything lives on this phone. Export a backup now and then — clearing browser data would erase your logs.</div>
-    <div class="note" style="text-align:center;margin-top:14px">GainLog v5.0</div>
+    <div class="note" style="text-align:center;margin-top:14px">GainLog v5.1</div>
   </div>
 </div>
 
@@ -395,11 +395,14 @@ function renderToday() {
           <div class="foot"><span class="t">${e.time}</span></div>`;
       } else if (e.status === 'error' || e.status === 'analyzing') {
         const isNoKey = e.errorMsg === 'nokey';
-        const label = isNoKey ? 'No API key set' : (e.status === 'analyzing' ? 'Analysis was interrupted' : "Couldn't analyze this");
+        const isQuota = e.errorMsg === 'quota';
+        const label = isNoKey ? 'No API key set' : isQuota ? 'Daily free quota used up' : (e.status === 'analyzing' ? 'Analysis was interrupted' : "Couldn't analyze this");
+        const showDetail = !isNoKey && !isQuota && e.errorMsg && e.status !== 'analyzing';
         div.innerHTML = `
           <div style="display:flex;gap:10px;align-items:center">${thumbHtml}
             <div style="flex:1;min-width:0">
               <div style="font-size:13px;color:var(--danger)">${label}${e.desc ? ': "' + esc(e.desc) + '"' : ''}</div>
+              ${showDetail ? `<div style="font-size:10.5px;color:var(--ink-3);margin-top:3px;word-break:break-all">${esc(e.errorMsg)}</div>` : ''}
             </div>
           </div>
           <div class="foot"><span class="t">${e.time}</span><span>
