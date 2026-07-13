@@ -263,7 +263,7 @@
     <button class="btn ghost" id="imp">Import backup</button>
     <input type="file" id="imp-file" accept="application/json" class="hide">
     <div class="note">Everything lives on this phone. Export a backup now and then — clearing browser data would erase your logs.</div>
-    <div class="note" style="text-align:center;margin-top:14px">GainLog v5.2</div>
+    <div class="note" style="text-align:center;margin-top:14px">GainLog v5.3</div>
   </div>
 </div>
 
@@ -875,7 +875,7 @@ async function analyzePhoto(file) {
 // Google deprecates Gemini model names every few months (2.0-flash retired June 2026,
 // 2.5-flash-lite retired before its announced date, etc). Instead of hardcoding a name that
 // will eventually 404, we ask Google which models currently exist and pick a suitable one.
-const FALLBACK_MODELS = ['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
+const FALLBACK_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash'];
 
 async function resolveModel(key) {
   const cached = LS.get('gemini_model', null);
@@ -907,6 +907,18 @@ async function resolveModel(key) {
 }
 
 function invalidateModelCache() { LS.set('gemini_model', null); }
+
+// Gemini doesn't always wrap results in exactly {"items":[...]} even when asked to —
+// sometimes it's a bare array, or uses a different key. Try the common variants before giving up.
+function extractItemsArray(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== 'object') return null;
+  const candidates = ['items', 'food_items', 'foods', 'results', 'data', 'foodItems'];
+  for (const k of candidates) { if (Array.isArray(parsed[k])) return parsed[k]; }
+  // last resort: first array value found anywhere on the object
+  for (const v of Object.values(parsed)) { if (Array.isArray(v)) return v; }
+  return null;
+}
 
 async function aiAnalyze({ imageBase64, description }) {
   const key = LS.get('apikey', '');
@@ -954,13 +966,15 @@ Realistic estimates. Calories in kcal, macros in grams. Multiple foods = multipl
       }
       let parsed;
       try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
-      catch (e3) { attempts.push({ model, note: 'non-JSON reply: ' + text.slice(0, 60) }); continue; }
-      if (!parsed.items || !Array.isArray(parsed.items) || !parsed.items.length) { attempts.push({ model, note: 'unexpected shape' }); continue; }
+      catch (e3) { attempts.push({ model, note: 'non-JSON reply: ' + text.slice(0, 80) }); continue; }
+      const arr = extractItemsArray(parsed);
+      if (!arr) { attempts.push({ model, note: 'unexpected shape: ' + JSON.stringify(parsed).slice(0, 120) }); continue; }
+      if (!arr.length) { attempts.push({ model, note: "model returned zero items (couldn't identify food in image?)" }); continue; }
       LS.set('gemini_model', { model, at: Date.now() }); // remember what actually worked
-      return parsed.items.map((it) => ({
-        name: String(it.name || 'Food item'), quantity: String(it.quantity || ''),
-        calories: Number(it.calories) || 0, carbs: Number(it.carbs) || 0,
-        protein: Number(it.protein) || 0, fat: Number(it.fat) || 0,
+      return arr.map((it) => ({
+        name: String(it.name || it.food || it.food_name || 'Food item'), quantity: String(it.quantity || it.amount || it.portion || ''),
+        calories: Number(it.calories || it.kcal || 0) || 0, carbs: Number(it.carbs || it.carbohydrates || 0) || 0,
+        protein: Number(it.protein || 0) || 0, fat: Number(it.fat || 0) || 0,
       }));
     } catch (e) { attempts.push({ model, note: 'network: ' + (e && e.message ? e.message : 'failed') }); }
   }
