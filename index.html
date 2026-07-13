@@ -202,6 +202,10 @@
       <input id="w-input" type="number" step="0.1" placeholder="Today's weight (kg)" style="flex:1;padding:11px 12px;border:1px solid var(--line);border-radius:14px;outline:none;font-size:13.5px">
       <button class="btn" style="width:auto;padding:11px 18px" id="w-save">Save</button>
     </div>
+    <div style="display:flex;gap:10px;margin-top:10px">
+      <input id="wt-input" type="number" step="0.1" placeholder="Target weight (kg)" style="flex:1;padding:11px 12px;border:1px solid var(--line);border-radius:14px;outline:none;font-size:13.5px">
+      <button class="btn ghost" style="width:auto;padding:11px 18px" id="wt-save">Set</button>
+    </div>
     <div class="note" id="w-note"></div>
   </div>
 
@@ -263,7 +267,7 @@
     <button class="btn ghost" id="imp">Import backup</button>
     <input type="file" id="imp-file" accept="application/json" class="hide">
     <div class="note">Everything lives on this phone. Export a backup now and then — clearing browser data would erase your logs.</div>
-    <div class="note" style="text-align:center;margin-top:14px">GainLog v5.3</div>
+    <div class="note" style="text-align:center;margin-top:14px">GainLog v6.0</div>
   </div>
 </div>
 
@@ -434,14 +438,45 @@ function renderToday() {
         patchEntry(di, e.id, { status: 'analyzing', errorMsg: null });
         runAnalysis(di, e.id, src);
       };
+      if (e.status !== 'analyzing' && e.status !== 'error') {
+        div.querySelectorAll('.item').forEach((itemEl, idx) => {
+          itemEl.onclick = () => showNutritionDetail(e.items[idx]);
+        });
+      }
       list.appendChild(div);
     });
   }
   renderStreak();
 }
 function itemHtml(it) {
-  return `<div class="item"><div class="nm">${esc(it.name)}${it.quantity ? ' (' + esc(it.quantity) + ')' : ''}</div>
+  return `<div class="item" style="cursor:pointer"><div class="nm">${esc(it.name)}${it.quantity ? ' (' + esc(it.quantity) + ')' : ''} <span style="color:var(--ink-3);font-weight:400">ⓘ</span></div>
        <div class="nu">${Math.round(it.calories)} kcal · C ${round1(it.carbs)}g · P ${round1(it.protein)}g · F ${round1(it.fat)}g</div></div>`;
+}
+function nutRow(label, val, unit) {
+  const num = Number(val);
+  const show = (val === undefined || val === null || isNaN(num)) ? '–' : round1(num) + unit;
+  return `<div><div style="font-size:11px;color:var(--ink-3)">${label}</div><div style="font-size:15px;font-weight:600">${show}</div></div>`;
+}
+function showNutritionDetail(item) {
+  sheet(item.name || 'Nutrition details', `<div class="spin"><div class="spinner"></div>Getting detailed nutrition…</div>`);
+  getMicronutrients(item).then((n) => {
+    const sb = $('sheet-body'); if (!sb) return;
+    sb.innerHTML = `
+      <div style="font-size:13px;color:var(--ink-2);margin-bottom:14px">${esc(item.quantity || '')} · ${Math.round(item.calories)} kcal · C ${round1(item.carbs)}g · P ${round1(item.protein)}g · F ${round1(item.fat)}g</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 16px">
+        ${nutRow('Fiber', n.fiber, 'g')}${nutRow('Sugar', n.sugar, 'g')}
+        ${nutRow('Sodium', n.sodium, 'mg')}${nutRow('Cholesterol', n.cholesterol, 'mg')}
+        ${nutRow('Vitamin A', n.vitaminA, 'mcg')}${nutRow('Vitamin C', n.vitaminC, 'mg')}
+        ${nutRow('Calcium', n.calcium, 'mg')}${nutRow('Iron', n.iron, 'mg')}
+        ${nutRow('Potassium', n.potassium, 'mg')}
+      </div>
+      <div class="note" style="margin-top:16px">AI-estimated for this specific quantity — treat as approximate, not lab-verified.</div>`;
+  }).catch((err) => {
+    const sb = $('sheet-body'); if (!sb) return;
+    const noKey = err && err.message === 'nokey';
+    sb.innerHTML = `<p style="font-size:13.5px;color:var(--ink-2);line-height:1.5">${noKey ? 'No API key set — add one in Settings → AI setup.' : "Couldn't get detailed nutrition."}</p>
+      ${!noKey ? `<p style="font-size:11px;color:var(--ink-3);background:#F5F3EE;padding:8px 10px;border-radius:10px;margin-top:8px;word-break:break-all">${esc(err && err.message || 'failed')}</p>` : ''}`;
+  });
 }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function newId() { return Date.now() + '-' + Math.random().toString(36).slice(2, 8); }
@@ -479,33 +514,59 @@ function renderStreak() {
 
 // ---------- progress tab ----------
 function renderProgress() {
-  // weight chart
   const weights = LS.get('weights', []); // [{date, kg}]
+  const targetWeight = LS.get('target_weight', null);
+  $('wt-input').placeholder = targetWeight ? `Target: ${targetWeight} kg` : 'Target weight (kg)';
   const c = $('wchart'), ctx = c.getContext('2d');
   ctx.clearRect(0, 0, c.width, c.height);
   const data = weights.slice(-30);
-  if (data.length >= 2) {
-    const min = Math.min(...data.map((w) => w.kg)) - 0.5;
-    const max = Math.max(...data.map((w) => w.kg)) + 0.5;
-    const px = (i) => 40 + (i / (data.length - 1)) * (c.width - 60);
+
+  if (data.length === 0) {
+    ctx.fillStyle = '#A5A199'; ctx.font = '20px sans-serif';
+    ctx.fillText('Log your weight to start tracking.', 40, c.height / 2);
+    $('w-note').textContent = '';
+  } else {
+    const kgs = data.map((w) => w.kg);
+    if (targetWeight) kgs.push(targetWeight);
+    const min = Math.min(...kgs) - 0.5;
+    const max = Math.max(...kgs) + 0.5;
+    const px = (i) => data.length > 1 ? 40 + (i / (data.length - 1)) * (c.width - 60) : c.width / 2;
     const py = (kg) => 20 + (1 - (kg - min) / (max - min)) * (c.height - 60);
+
     ctx.strokeStyle = '#E8E5DE'; ctx.lineWidth = 1; ctx.font = '18px sans-serif'; ctx.fillStyle = '#A5A199';
     for (let g = 0; g <= 3; g++) {
       const kg = min + (g / 3) * (max - min), y = py(kg);
       ctx.beginPath(); ctx.moveTo(40, y); ctx.lineTo(c.width - 20, y); ctx.stroke();
       ctx.fillText(round1(kg), 2, y + 6);
     }
-    ctx.strokeStyle = '#3F6B4F'; ctx.lineWidth = 3; ctx.beginPath();
-    data.forEach((w, i) => { i ? ctx.lineTo(px(i), py(w.kg)) : ctx.moveTo(px(i), py(w.kg)); });
-    ctx.stroke();
-    ctx.fillStyle = '#C9973B';
-    data.forEach((w, i) => { ctx.beginPath(); ctx.arc(px(i), py(w.kg), 5, 0, 7); ctx.fill(); });
-    const diff = round1(data[data.length - 1].kg - data[0].kg);
-    $('w-note').textContent = `${data.length} entries · ${diff >= 0 ? '+' : ''}${diff} kg over this period. Target: +0.25–0.5 kg/week.`;
-  } else {
-    ctx.fillStyle = '#A5A199'; ctx.font = '20px sans-serif';
-    ctx.fillText('Log your weight a few times to see the trend.', 40, c.height / 2);
-    $('w-note').textContent = '';
+
+    if (targetWeight) {
+      const ty = py(targetWeight);
+      ctx.save();
+      ctx.setLineDash([7, 5]);
+      ctx.strokeStyle = '#C9973B'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(40, ty); ctx.lineTo(c.width - 20, ty); ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = '#C9973B'; ctx.font = '13px sans-serif';
+      ctx.fillText('Target ' + round1(targetWeight) + 'kg', c.width - 155, ty - 8);
+    }
+
+    if (data.length >= 2) {
+      ctx.strokeStyle = '#3F6B4F'; ctx.lineWidth = 3; ctx.beginPath();
+      data.forEach((w, i) => { i ? ctx.lineTo(px(i), py(w.kg)) : ctx.moveTo(px(i), py(w.kg)); });
+      ctx.stroke();
+    }
+    data.forEach((w, i) => { ctx.beginPath(); ctx.arc(px(i), py(w.kg), 5, 0, 7); ctx.fillStyle = '#3F6B4F'; ctx.fill(); });
+
+    const last = data[data.length - 1].kg;
+    let note = data.length >= 2
+      ? `${data.length} entries · ${(() => { const diff = round1(last - data[0].kg); return (diff >= 0 ? '+' : '') + diff; })()} kg over this period.`
+      : `First entry logged: ${round1(last)} kg. Log a few more times to see the trend line.`;
+    if (targetWeight) {
+      const remain = round1(targetWeight - last);
+      note += remain === 0 ? " You're at your target! 🎉" : ` ${Math.abs(remain)} kg ${remain > 0 ? 'to go' : 'past target'}.`;
+    }
+    $('w-note').textContent = note;
   }
 
   // weekly table
@@ -535,7 +596,15 @@ $('w-save').onclick = () => {
   weights.sort((a, b) => a.date < b.date ? -1 : 1);
   LS.set('weights', weights);
   $('w-input').value = '';
-  toast('Weight saved');
+  toast('Weight saved ✓');
+  renderProgress();
+};
+$('wt-save').onclick = () => {
+  const v = parseFloat($('wt-input').value);
+  if (!v || v < 20 || v > 300) return toast('Enter a valid target weight in kg');
+  LS.set('target_weight', v);
+  $('wt-input').value = '';
+  toast('Target set ✓');
   renderProgress();
 };
 
@@ -920,18 +989,11 @@ function extractItemsArray(parsed) {
   return null;
 }
 
-async function aiAnalyze({ imageBase64, description }) {
+// Core Gemini caller: tries candidate models in order, returns the raw parsed JSON object.
+// Shared by aiAnalyze() (food items) and getMicronutrients() (detailed nutrition popup).
+async function callGeminiJSON(parts) {
   const key = LS.get('apikey', '');
   if (!key) throw new Error('nokey');
-
-  const parts = [];
-  if (imageBase64) parts.push({ inlineData: { mimeType: 'image/jpeg', data: imageBase64 } });
-  const instruction = description
-    ? `The user ate: "${description}". Estimate nutrition for this. Common South Asian / Bangladeshi foods are likely.`
-    : 'Identify the food(s) in this photo and estimate nutrition for the visible portion size. Common South Asian / Bangladeshi foods are likely.';
-  parts.push({ text: instruction + `\nRespond with ONLY valid JSON, exactly this shape:
-{"items":[{"name":"short food name","quantity":"e.g. '1 bowl' or '2 pieces'","calories":number,"carbs":number,"protein":number,"fat":number}]}
-Realistic estimates. Calories in kcal, macros in grams. Multiple foods = multiple items.` });
 
   const body = JSON.stringify({
     contents: [{ parts }],
@@ -941,15 +1003,14 @@ Realistic estimates. Calories in kcal, macros in grams. Multiple foods = multipl
   const discovered = await resolveModel(key);
   const candidates = discovered ? [discovered, ...FALLBACK_MODELS.filter((m) => m !== discovered)] : FALLBACK_MODELS;
 
-  const attempts = []; // { model, note } — used to build a full diagnostic if every candidate fails
-  let sawQuota = false, sawNoOtherError = true;
+  const attempts = [];
   for (const model of candidates) {
     try {
       const res = await fetch(
         'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + encodeURIComponent(key),
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }
       );
-      if (res.status === 429) { sawQuota = true; attempts.push({ model, note: '429 quota' }); continue; }
+      if (res.status === 429) { attempts.push({ model, note: '429 quota' }); continue; }
       if (!res.ok) {
         let detail = '';
         try { const errJson = await res.json(); detail = errJson?.error?.message || ''; } catch (e2) {}
@@ -967,19 +1028,44 @@ Realistic estimates. Calories in kcal, macros in grams. Multiple foods = multipl
       let parsed;
       try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
       catch (e3) { attempts.push({ model, note: 'non-JSON reply: ' + text.slice(0, 80) }); continue; }
-      const arr = extractItemsArray(parsed);
-      if (!arr) { attempts.push({ model, note: 'unexpected shape: ' + JSON.stringify(parsed).slice(0, 120) }); continue; }
-      if (!arr.length) { attempts.push({ model, note: "model returned zero items (couldn't identify food in image?)" }); continue; }
       LS.set('gemini_model', { model, at: Date.now() }); // remember what actually worked
-      return arr.map((it) => ({
-        name: String(it.name || it.food || it.food_name || 'Food item'), quantity: String(it.quantity || it.amount || it.portion || ''),
-        calories: Number(it.calories || it.kcal || 0) || 0, carbs: Number(it.carbs || it.carbohydrates || 0) || 0,
-        protein: Number(it.protein || 0) || 0, fat: Number(it.fat || 0) || 0,
-      }));
+      return parsed;
     } catch (e) { attempts.push({ model, note: 'network: ' + (e && e.message ? e.message : 'failed') }); }
   }
-  if (sawQuota && attempts.every((a) => a.note.includes('429'))) throw new Error('quota');
+  if (attempts.length && attempts.every((a) => a.note.includes('429'))) throw new Error('quota');
   throw new Error(attempts.map((a) => a.model + '→' + a.note).join(' | '));
+}
+
+async function aiAnalyze({ imageBase64, description }) {
+  const parts = [];
+  if (imageBase64) parts.push({ inlineData: { mimeType: 'image/jpeg', data: imageBase64 } });
+  const instruction = description
+    ? `The user ate: "${description}". Estimate nutrition for this. Common South Asian / Bangladeshi foods are likely.`
+    : 'Identify the food(s) in this photo and estimate nutrition for the visible portion size. Common South Asian / Bangladeshi foods are likely.';
+  parts.push({ text: instruction + `\nRespond with ONLY valid JSON, exactly this shape:
+{"items":[{"name":"short food name","quantity":"e.g. '1 bowl' or '2 pieces'","calories":number,"carbs":number,"protein":number,"fat":number}]}
+Realistic estimates. Calories in kcal, macros in grams. Multiple foods = multiple items.` });
+
+  const parsed = await callGeminiJSON(parts);
+  const arr = extractItemsArray(parsed);
+  if (!arr) throw new Error('unexpected shape: ' + JSON.stringify(parsed).slice(0, 120));
+  if (!arr.length) throw new Error("model returned zero items (couldn't identify food?)");
+  return arr.map((it) => ({
+    name: String(it.name || it.food || it.food_name || 'Food item'), quantity: String(it.quantity || it.amount || it.portion || ''),
+    calories: Number(it.calories || it.kcal || 0) || 0, carbs: Number(it.carbs || it.carbohydrates || 0) || 0,
+    protein: Number(it.protein || 0) || 0, fat: Number(it.fat || 0) || 0,
+  }));
+}
+
+async function getMicronutrients(item) {
+  const parts = [{
+    text: `For this food item: "${item.name}"${item.quantity ? ' (' + item.quantity + ')' : ''}, already estimated at ${Math.round(item.calories)} kcal, ${round1(item.carbs)}g carbs, ${round1(item.protein)}g protein, ${round1(item.fat)}g fat — provide a detailed micronutrient breakdown for this specific quantity.
+Respond with ONLY valid JSON, exactly this shape:
+{"fiber":number,"sugar":number,"sodium":number,"cholesterol":number,"vitaminA":number,"vitaminC":number,"calcium":number,"iron":number,"potassium":number}
+Units: fiber/sugar in grams, sodium/cholesterol/calcium/iron/potassium in milligrams, vitaminA in micrograms RAE, vitaminC in milligrams. Give realistic estimates for this exact food and quantity; use 0 if genuinely negligible.` }];
+  const parsed = await callGeminiJSON(parts);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('unexpected shape: ' + JSON.stringify(parsed).slice(0, 120));
+  return parsed;
 }
 
 let reviewItems = [];
@@ -1025,11 +1111,34 @@ function drawReview() {
         <div><label>carbs g</label><input type="number" data-f="carbs" value="${it.carbs}"></div>
         <div><label>protein g</label><input type="number" data-f="protein" value="${it.protein}"></div>
         <div><label>fat g</label><input type="number" data-f="fat" value="${it.fat}"></div>
-      </div>`;
+      </div>
+      <button class="btn ghost reanalyze" style="margin-top:10px;padding:9px;font-size:12.5px">↻ Re-analyze with AI</button>`;
     d.querySelector('.nm').oninput = (e) => { reviewItems[idx].name = e.target.value; };
     d.querySelector('.qty').oninput = (e) => { reviewItems[idx].quantity = e.target.value; };
     d.querySelectorAll('[data-f]').forEach((inp) => { inp.oninput = (e) => { reviewItems[idx][inp.dataset.f] = Number(e.target.value) || 0; }; });
     d.querySelector('.rm').onclick = () => { reviewItems.splice(idx, 1); drawReview(); };
+    const reBtn = d.querySelector('.reanalyze');
+    reBtn.onclick = async () => {
+      const nameVal = reviewItems[idx].name.trim();
+      if (!nameVal) { toast('Enter a food name first'); return; }
+      const qtyVal = reviewItems[idx].quantity.trim();
+      reBtn.textContent = '…'; reBtn.disabled = true;
+      try {
+        const result = await aiAnalyze({ description: nameVal + (qtyVal ? ' (' + qtyVal + ')' : '') });
+        if (result && result.length) {
+          const r = result[0];
+          reviewItems[idx] = { ...reviewItems[idx], calories: r.calories, carbs: r.carbs, protein: r.protein, fat: r.fat };
+          drawReview();
+          toast('Updated from AI ✓');
+        } else {
+          toast('AI could not re-analyze this');
+        }
+      } catch (err) {
+        toast('Re-analyze failed — check connection/key');
+      } finally {
+        reBtn.textContent = '↻ Re-analyze with AI'; reBtn.disabled = false;
+      }
+    };
     list.appendChild(d);
   });
   const add = document.createElement('button');
